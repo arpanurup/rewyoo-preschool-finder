@@ -47,6 +47,44 @@ def jsonld(soup):
     elif isinstance(a,str): addresses.append(clean(a))
   except Exception: pass
  return (names[0] if names else '',addresses[0] if addresses else '',years[0] if years else '')
+
+def is_directory_or_list_page(host, title, snippet):
+ host=(host or '').lower().replace('www.','')
+ blocked=['proeves.com','kiddenz.com','kidoschools.com','edustoke.com','schoolmykids.com','justdial.com','sulekha.com','urbanpro.com']
+ if any(host==d or host.endswith('.'+d) for d in blocked): return True
+ s=clean((title or '')+' '+(snippet or '')).lower()
+ patterns=[r'\btop\s+\d*\s*(preschools?|playschools?|daycares?|creches?|centres?|centers?)\b',
+           r'\b(best|top|list of|list)\b.*\b(preschools?|playschools?|daycares?|creches?|centres?|centers?)\b',
+           r'\b\d+\s+(preschool|playschool|daycare|creche)']
+ return any(re.search(p,s,re.I) for p in patterns)
+
+def plausible_name(name):
+ name=clean(name)
+ if len(name)<3 or len(name)>90: return False
+ low=name.lower()
+ generic=['best preschool','top preschool','preschools in','preschool in','best day care','top day care','daycare centres','daycare centers','creche centres','list of','124 creche','the 32 best','top preschool &']
+ if any(x in low for x in generic): return False
+ if re.search(r'\b(in|near|around)\s+(whitefield|bengaluru|bangalore|india)\b',low): return False
+ return True
+
+def brand_name(soup,json_name,h1):
+ candidates=[]
+ if json_name: candidates.append(json_name)
+ for attr,val in [('property','og:site_name'),('name','application-name')]:
+  tag=soup.find('meta',attrs={attr:val})
+  if tag and tag.get('content'): candidates.append(tag['content'])
+ for tag in soup.select('header img[alt], nav img[alt], img[class*="logo"][alt], img[id*="logo"][alt]'):
+  if tag.get('alt'): candidates.append(tag['alt'])
+ for selector in ['header [class*="logo"]','header [class*="brand"]','nav [class*="logo"]','[class*="site-title"]']:
+  tag=soup.select_one(selector)
+  if tag: candidates.append(tag.get_text(' ',strip=True))
+ if h1: candidates.append(h1)
+ for candidate in candidates:
+  candidate=clean(candidate)
+  if plausible_name(candidate): return candidate
+ return ''
+
+
 def extract_page(url,title,snippet):
  try:
   r=requests.get(url,headers=HEADERS,timeout=12,allow_redirects=True)
@@ -57,7 +95,8 @@ def extract_page(url,title,snippet):
   if len(text)<80: return None
   jname,jaddr,jyear=jsonld(soup)
   h1=clean(soup.find('h1').get_text(' ',strip=True) if soup.find('h1') else '')
-  name=jname or h1 or clean(soup.title.get_text(' ',strip=True) if soup.title else title).split('|')[0].split(' - ')[0]
+  name=brand_name(soup,jname,h1)
+  if not name: return None
   emails=[e for e in sorted(set(re.findall(r'[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}',text,re.I))) if not any(x in e.lower() for x in ['example.com','domain.com','wixpress.com'])]
   phones=[]
   for value in re.findall(r'(?:\+91[\s-]?)?[6-9]\d{9}',text):
@@ -100,8 +139,9 @@ def collect(locality,city,district,state,categories,limit,progress):
    url=item.get('href') or item.get('url') or ''
    if not url.startswith(('http://','https://')): continue
    host=urlparse(url).netloc.lower()
-   if any(x in host for x in ['facebook.com','instagram.com','youtube.com','linkedin.com','justdial.com']): continue
+   if any(x in host for x in ['facebook.com','instagram.com','youtube.com','linkedin.com']): continue
    title=clean(item.get('title','')); snippet=clean(item.get('body','') or item.get('description',''))
+   if is_directory_or_list_page(host,title,snippet): continue
    combined=(title+' '+snippet+' '+url).lower()
    if not any(w in combined for w in ['preschool','pre school','playschool','play school','montessori','kindergarten','nursery','daycare','day care']): continue
    page=extract_page(url,title,snippet)
@@ -110,7 +150,9 @@ def collect(locality,city,district,state,categories,limit,progress):
    preschool_hit=any(w in page['text'] for w in ['preschool','pre school','playschool','play school','montessori','kindergarten','nursery','daycare','day care','early learning'])
    category_hit=any(any(w in page['text'] for w in CATEGORIES[c]) for c in categories)
    if not preschool_hit or not (local_hit or any(t in page['text'] for t in terms)) or (categories and not category_hit): continue
-   branch=next((x for x in [locality,city,district] if x and x.lower() in (title+' '+snippet).lower()),'')
+   branch=''
+   bm=re.search(r"([A-Z][A-Za-z0-9&' .-]{2,55})\\s+(?:branch|centre|center)",title+' '+snippet,re.I)
+   if bm and plausible_name(bm.group(1)): branch=clean(bm.group(1))
    rec={'Preschool Name':page['name'],'Branch Name':branch,'Website':page['website'],'Email':page['email'],'Phone Number':page['phones'][0] if page['phones'] else '', 'Alternate Phone':page['phones'][1] if len(page['phones'])>1 else '', 'Full Address':page['address'],'Locality':locality,'Pincode':page['pincode'],'District':district,'State':state,'Country':'India','Preschool Type':', '.join(c for c,ws in CATEGORIES.items() if any(w in page['text'] for w in ws)) or 'Preschool','Category':', '.join(categories),'Established Year':page['year']}
    key=norm(rec['Website'] or rec['Preschool Name'])+'|'+norm(rec['Phone Number'])+'|'+norm(rec['Full Address'])
    if key.strip('|') and key not in found: found[key]=rec
