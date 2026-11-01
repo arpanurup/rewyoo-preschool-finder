@@ -3,17 +3,18 @@ import pandas as pd
 import requests
 import re
 import json
-import time
 import io
+import time
+
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from ddgs import DDGS
 from datetime import datetime
 
 
-# --------------------------------------------------
+# ==========================================
 # APPLICATION SETTINGS
-# --------------------------------------------------
+# ==========================================
 
 st.set_page_config(
     page_title="Rewyoo Preschool Finder",
@@ -39,25 +40,6 @@ FIELDS = [
     "Established Year"
 ]
 
-BLOCKED_DOMAINS = [
-    "facebook.com",
-    "instagram.com",
-    "youtube.com",
-    "linkedin.com",
-    "twitter.com",
-    "x.com",
-    "scribd.com",
-    "pinterest.com",
-    "wikipedia.org",
-    "justdial.com",
-    "sulekha.com",
-    "yellowpages.com",
-    "yellowpages.in",
-    "mouthshut.com",
-    "quora.com",
-    "reddit.com"
-]
-
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -65,10 +47,52 @@ HEADERS = {
     )
 }
 
+BLOCKED_DOMAINS = [
+    "facebook.com",
+    "instagram.com",
+    "youtube.com",
+    "linkedin.com",
+    "twitter.com",
+    "pinterest.com",
+    "wikipedia.org",
+    "scribd.com",
+    "quora.com",
+    "reddit.com",
+    "justdial.com",
+    "sulekha.com",
+    "yellowpages.com",
+    "yellowpages.in",
+    "edustoke.com",
+    "yellowpages.net",
+    "mouthshut.com",
+    "shiksha.com",
+    "collegedunia.com",
+    "proeves.com",
+    "schoolmykids.com",
+    "preprimaryschools.com"
+]
 
-# --------------------------------------------------
+BLOCKED_PATHS = [
+    "/blog/",
+    "/blogs/",
+    "/article/",
+    "/articles/",
+    "/news/",
+    "/stories/",
+    "/document/",
+    "/documents/",
+    "/wiki/",
+    "/definition/",
+    "/what-is-",
+    "/guide/",
+    "/guides/",
+    "/registration/"
+]
+
+
+# ==========================================
 # SESSION STORAGE
-# --------------------------------------------------
+# ==========================================
 
 if "results" not in st.session_state:
     st.session_state.results = []
@@ -77,55 +101,112 @@ if "history" not in st.session_state:
     st.session_state.history = []
 
 
-# --------------------------------------------------
-# HELPER FUNCTIONS
-# --------------------------------------------------
+# ==========================================
+# TEXT UTILITIES
+# ==========================================
 
 def clean_text(value):
+
     if not value:
         return ""
 
-    return re.sub(r"\s+", " ", str(value)).strip()
+    return re.sub(
+        r"\s+",
+        " ",
+        str(value)
+    ).strip()
+
+
+def normalize(value):
+
+    value = clean_text(value).lower()
+
+    value = re.sub(
+        r"[^a-z0-9\s]",
+        " ",
+        value
+    )
+
+    return re.sub(
+        r"\s+",
+        " ",
+        value
+    ).strip()
 
 
 def root_website(url):
+
     try:
+
         parsed = urlparse(url)
 
         if not parsed.netloc:
             return ""
 
-        domain = parsed.netloc.lower()
-
-        if not parsed.scheme:
-            return "https://" + domain
-
-        return f"{parsed.scheme}://{domain}"
+        return (
+            f"{parsed.scheme or 'https'}://"
+            f"{parsed.netloc.lower()}"
+        )
 
     except Exception:
+
         return ""
 
 
-def is_valid_domain(url):
+def valid_domain(url):
 
     try:
+
         domain = urlparse(url).netloc.lower()
 
         if not domain:
             return False
 
-        if any(blocked in domain for blocked in BLOCKED_DOMAINS):
-            return False
+        for blocked in BLOCKED_DOMAINS:
+
+            if blocked in domain:
+                return False
+
+        path = urlparse(url).path.lower()
+
+        for blocked in BLOCKED_PATHS:
+
+            if blocked in path:
+                return False
 
         return True
 
     except Exception:
+
         return False
 
 
+def location_match(text, locality, district, state):
+
+    text = normalize(text)
+
+    if locality.strip():
+
+        return normalize(locality) in text
+
+    if district.strip():
+
+        return normalize(district) in text
+
+    if state.strip():
+
+        return normalize(state) in text
+
+    return False
+
+
+# ==========================================
+# JSON-LD EXTRACTION
+# ==========================================
+
 def extract_jsonld(soup):
 
-    collected = []
+    output = []
 
     for script in soup.find_all(
         "script",
@@ -133,48 +214,61 @@ def extract_jsonld(soup):
     ):
 
         try:
-            parsed = json.loads(
+
+            data = json.loads(
                 script.string or script.get_text()
             )
 
-            if isinstance(parsed, list):
-                collected.extend(parsed)
+            if isinstance(data, list):
+
+                output.extend(data)
+
             else:
-                collected.append(parsed)
+
+                output.append(data)
 
         except Exception:
+
             continue
 
-    return collected
+    return output
 
 
 def flatten_json(data):
 
-    items = []
+    result = []
 
     def walk(obj):
 
         if isinstance(obj, dict):
 
-            items.append(obj)
+            result.append(obj)
 
             for value in obj.values():
+
                 walk(value)
 
         elif isinstance(obj, list):
 
             for value in obj:
+
                 walk(value)
 
     walk(data)
 
-    return items
+    return result
 
 
-def get_jsonld_details(items):
+# ==========================================
+# BUSINESS INFORMATION
+# ==========================================
+
+def get_business_details(items):
 
     details = {
+
         "name": "",
+        "branch": "",
         "address": "",
         "locality": "",
         "pincode": "",
@@ -184,16 +278,49 @@ def get_jsonld_details(items):
         "email": "",
         "phone": "",
         "established": ""
+
     }
 
     for item in items:
 
-        if not details["name"]:
+        item_type = item.get("@type", "")
 
-            name = item.get("name")
+        if isinstance(item_type, list):
 
-            if isinstance(name, str):
-                details["name"] = clean_text(name)
+            item_type = " ".join(item_type)
+
+        item_type = str(item_type).lower()
+
+        business_types = [
+            "preschool",
+            "school",
+            "localbusiness",
+            "childcare",
+            "educationalorganization",
+            "organization"
+        ]
+
+        if (
+            not details["name"]
+            and any(x in item_type for x in business_types)
+        ):
+
+            details["name"] = clean_text(
+                item.get("name", "")
+            )
+
+        if (
+            not details["branch"]
+            and item.get("branchOf")
+        ):
+
+            branch = item.get("branchOf")
+
+            if isinstance(branch, dict):
+
+                details["branch"] = clean_text(
+                    branch.get("name", "")
+                )
 
         address = item.get("address")
 
@@ -201,15 +328,15 @@ def get_jsonld_details(items):
 
             details["address"] = clean_text(
                 ", ".join(
-                    str(address.get(key, ""))
-                    for key in [
+                    str(address.get(k, ""))
+                    for k in [
                         "streetAddress",
                         "addressLocality",
                         "addressRegion",
                         "postalCode",
                         "addressCountry"
                     ]
-                    if address.get(key)
+                    if address.get(k)
                 )
             )
 
@@ -221,13 +348,21 @@ def get_jsonld_details(items):
                 address.get("postalCode", "")
             )
 
+            details["district"] = clean_text(
+                address.get("addressLocality", "")
+            )
+
             details["state"] = clean_text(
                 address.get("addressRegion", "")
             )
 
-            country = address.get("addressCountry", "")
+            country = address.get(
+                "addressCountry",
+                ""
+            )
 
             if isinstance(country, dict):
+
                 country = country.get("name", "")
 
             details["country"] = clean_text(country)
@@ -236,29 +371,124 @@ def get_jsonld_details(items):
 
             details["address"] = clean_text(address)
 
-        if not details["email"] and item.get("email"):
-            details["email"] = clean_text(item["email"])
+        if not details["email"]:
 
-        if not details["phone"] and item.get("telephone"):
-            details["phone"] = clean_text(item["telephone"])
-
-        if not details["established"] and item.get("foundingDate"):
-
-            year = re.search(
-                r"\b(19|20)\d{2}\b",
-                str(item["foundingDate"])
+            details["email"] = clean_text(
+                item.get("email", "")
             )
 
-            if year:
-                details["established"] = year.group(0)
+        if not details["phone"]:
+
+            details["phone"] = clean_text(
+                item.get("telephone", "")
+            )
+
+        if not details["established"]:
+
+            date = item.get("foundingDate")
+
+            if date:
+
+                match = re.search(
+                    r"\b(19|20)\d{2}\b",
+                    str(date)
+                )
+
+                if match:
+
+                    details["established"] = (
+                        match.group(0)
+                    )
 
     return details
 
 
+# ==========================================
+# ESTABLISHED YEAR EXTRACTION
+# ==========================================
+
+def extract_established_year(text):
+
+    patterns = [
+
+        r"(?:established|founded|started|incorporated)"
+        r"\s+(?:in\s+)?(?:the\s+year\s+)?(19\d{2}|20[0-2]\d)",
+
+        r"(?:since|est\.?)\s+(19\d{2}|20[0-2]\d)",
+
+        r"(19\d{2}|20[0-2]\d)"
+        r"\s+(?:was\s+)?(?:established|founded)",
+
+        r"(?:our\s+journey\s+began|founded\s+in)"
+        r"\s+(19\d{2}|20[0-2]\d)"
+
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            year = int(match.group(1))
+
+            if 1950 <= year <= datetime.now().year:
+
+                return str(year)
+
+    return ""
+
+
+# ==========================================
+# PHONE EXTRACTION
+# ==========================================
+
+def extract_phones(text):
+
+    matches = re.findall(
+        r"(?:\+91[\s-]?)?[6-9]\d{9}",
+        text
+    )
+
+    output = []
+
+    for phone in matches:
+
+        phone = re.sub(
+            r"\D",
+            "",
+            phone
+        )
+
+        if len(phone) == 12 and phone.startswith("91"):
+
+            phone = phone[2:]
+
+        if (
+            len(phone) == 10
+            and phone[0] in "6789"
+            and phone not in output
+        ):
+
+            output.append(phone)
+
+    return output
+
+
+# ==========================================
+# WEBPAGE EXTRACTION
+# ==========================================
+
 def extract_page(url):
 
     details = {
+
         "name": "",
+        "branch": "",
         "email": "",
         "phones": [],
         "address": "",
@@ -268,7 +498,8 @@ def extract_page(url):
         "state": "",
         "country": "",
         "established": "",
-        "page_text": ""
+        "text": ""
+
     }
 
     try:
@@ -280,6 +511,7 @@ def extract_page(url):
         )
 
         if response.status_code != 200:
+
             return details
 
         soup = BeautifulSoup(
@@ -287,102 +519,96 @@ def extract_page(url):
             "html.parser"
         )
 
-        title = soup.title
-
-        if title:
-            details["name"] = clean_text(
-                title.get_text()
-            )
-
         json_items = flatten_json(
             extract_jsonld(soup)
         )
 
-        structured = get_jsonld_details(json_items)
+        structured = get_business_details(
+            json_items
+        )
 
         for key in structured:
 
             if structured[key]:
+
                 details[key] = structured[key]
 
-        # Extract emails
+        # Page title
 
-        emails = re.findall(
+        if not details["name"]:
+
+            if soup.title:
+
+                details["name"] = clean_text(
+                    soup.title.get_text()
+                )
+
+        # Emails
+
+        emails = []
+
+        for link in soup.find_all(
+            "a",
+            href=True
+        ):
+
+            href = link["href"]
+
+            if href.lower().startswith("mailto:"):
+
+                emails.append(
+                    href.replace(
+                        "mailto:",
+                        ""
+                    ).split("?")[0]
+                )
+
+        page_emails = re.findall(
             r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
             response.text
         )
 
-        emails = list(dict.fromkeys(emails))
+        emails.extend(page_emails)
 
-        emails = [
-            email for email in emails
-            if not any(
-                bad in email.lower()
-                for bad in [
-                    "example.com",
-                    "domain.com",
-                    "test.com"
-                ]
-            )
-        ]
+        for email in emails:
 
-        if not details["email"] and emails:
-            details["email"] = emails[0]
+            email = email.strip().lower()
 
-        # Extract phone numbers
+            if (
+                re.fullmatch(
+                    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+                    email
+                )
+                and not any(
+                    bad in email
+                    for bad in [
+                        "example.com",
+                        "domain.com",
+                        "test.com"
+                    ]
+                )
+            ):
 
-        phones = re.findall(
-            r"(?:\+91[\s-]?)?[6-9]\d{9}",
-            response.text
+                details["email"] = email
+
+                break
+
+        # Phone numbers
+
+        page_text = clean_text(
+            soup.get_text(" ", strip=True)
         )
 
-        cleaned_phones = []
+        details["phones"] = extract_phones(
+            page_text
+        )
 
-        for phone in phones:
-
-            phone = re.sub(r"\D", "", phone)
-
-            if len(phone) == 12 and phone.startswith("91"):
-                phone = phone[2:]
-
-            if len(phone) == 10 and phone[0] in "6789":
-
-                if phone not in cleaned_phones:
-                    cleaned_phones.append(phone)
-
-        details["phones"] = cleaned_phones
-
-        # Extract page text
-
-        for tag in soup([
-            "script",
-            "style",
-            "noscript"
-        ]):
-            tag.decompose()
-
-        details["page_text"] = clean_text(
-            soup.get_text(" ", strip=True)
-        )[:15000]
-
-        # Extract pincode if structured data did not provide it
-
-        if not details["pincode"]:
-
-            pincode = re.search(
-                r"\b[1-8]\d{5}\b",
-                details["page_text"]
-            )
-
-            if pincode:
-                details["pincode"] = pincode.group(0)
-
-        # Extract visible address elements if available
+        # Address
 
         if not details["address"]:
 
             for tag in soup.find_all(
-                ["address"],
+                "address",
                 limit=5
             ):
 
@@ -391,71 +617,68 @@ def extract_page(url):
                 )
 
                 if len(address) > 10:
+
                     details["address"] = address
+
                     break
+
+        # Remove irrelevant text from the page
+
+        for tag in soup([
+            "script",
+            "style",
+            "noscript"
+        ]):
+
+            tag.decompose()
+
+        details["text"] = clean_text(
+            soup.get_text(" ", strip=True)
+        )[:20000]
+
+        # Pincode
+
+        if not details["pincode"]:
+
+            match = re.search(
+                r"\b[1-8]\d{5}\b",
+                details["text"]
+            )
+
+            if match:
+
+                details["pincode"] = match.group(0)
+
+        # Established year
+
+        if not details["established"]:
+
+            details["established"] = (
+                extract_established_year(
+                    details["text"]
+                )
+            )
 
         return details
 
     except Exception:
+
         return details
 
 
-def classify_preschool(text):
+# ==========================================
+# PRESCHOOL VALIDATION
+# ==========================================
 
-    text = text.lower()
+def preschool_validation(text, locality, district, state):
 
-    if "montessori" in text:
-        return "Montessori"
-
-    if "daycare" in text or "day care" in text:
-        return "Daycare and Preschool"
-
-    if "kindergarten" in text:
-        return "Kindergarten"
-
-    if "nursery" in text:
-        return "Nursery School"
-
-    if "playschool" in text or "play school" in text:
-        return "Playschool"
-
-    return "Preschool"
-
-
-def clean_preschool_name(name):
-
-    name = clean_text(name)
-
-    for separator in [
-        " | ",
-        " - ",
-        " – ",
-        " — ",
-        " : "
-    ]:
-
-        if separator in name:
-            name = name.split(separator)[0].strip()
-
-    return name[:150]
-
-
-def get_domain_name(url):
-
-    domain = urlparse(url).netloc.lower()
-
-    domain = domain.replace("www.", "")
-
-    return domain
-
-
-def is_preschool_relevant(text):
-
-    text = text.lower()
+    text = normalize(text)
 
     keywords = [
+
         "preschool",
-        "pre-school",
+        "pre school",
+        "pre school education",
         "playschool",
         "play school",
         "montessori",
@@ -463,50 +686,132 @@ def is_preschool_relevant(text):
         "nursery school",
         "daycare",
         "day care"
+
     ]
 
-    return any(
+    if not any(
         keyword in text
         for keyword in keywords
+    ):
+
+        return False
+
+    irrelevant = [
+
+        "what is montessori",
+        "definition of montessori",
+        "psychology",
+        "research paper",
+        "school registration form",
+        "government of california",
+        "captcha",
+        "download pdf",
+        "best schools in india blog",
+        "top 10 schools blog"
+
+    ]
+
+    if any(
+        word in text
+        for word in irrelevant
+    ):
+
+        return False
+
+    return location_match(
+        text,
+        locality,
+        district,
+        state
     )
 
 
-# --------------------------------------------------
+# ==========================================
+# NAME EXTRACTION
+# ==========================================
+
+def clean_name(name):
+
+    name = clean_text(name)
+
+    separators = [
+        " | ",
+        " - ",
+        " – ",
+        " — ",
+        " : "
+    ]
+
+    for separator in separators:
+
+        if separator in name:
+
+            name = name.split(
+                separator
+            )[0].strip()
+
+    return name[:150]
+
+
+# ==========================================
 # SEARCH ENGINE
-# --------------------------------------------------
+# ==========================================
 
 def search_preschools(
+
     location,
-    selected_categories,
-    limit,
     locality,
     district,
     state,
-    country
+    country,
+    categories,
+    limit
+
 ):
 
-    found = []
+    results = []
 
     seen_urls = set()
+
     seen_branches = set()
 
-    queries = [
-        f"{category} in {location} India"
-        for category in selected_categories
-    ]
+    search_queries = []
 
-    progress_text = st.empty()
+    # Multiple search variations
 
-    progress_bar = st.progress(0)
+    for category in categories:
 
-    total_queries = len(queries)
+        search_queries.extend([
 
-    for query_number, query in enumerate(queries):
+            f"{category} {locality} {district} {state} address contact",
 
-        if len(found) >= limit:
+            f"preschool {locality} {district} official website",
+
+            f"playschool {locality} {state} phone address",
+
+            f"Montessori preschool {locality} {district}",
+
+            f"daycare preschool {locality} {district} contact"
+
+        ])
+
+    search_queries = list(
+        dict.fromkeys(search_queries)
+    )
+
+    progress = st.progress(0)
+
+    status = st.empty()
+
+    total_queries = len(search_queries)
+
+    for query_number, query in enumerate(search_queries):
+
+        if len(results) >= limit:
+
             break
 
-        progress_text.write(
+        status.write(
             f"Searching: {query}"
         )
 
@@ -517,7 +822,7 @@ def search_preschools(
                 search_results = list(
                     ddgs.text(
                         query,
-                        max_results=limit
+                        max_results=min(limit, 40)
                     )
                 )
 
@@ -527,20 +832,24 @@ def search_preschools(
 
         for result in search_results:
 
-            if len(found) >= limit:
+            if len(results) >= limit:
+
                 break
 
             url = result.get("href", "")
 
             if not url.startswith("http"):
+
                 continue
 
-            if not is_valid_domain(url):
+            if not valid_domain(url):
+
                 continue
 
-            normalized_url = root_website(url)
+            website = root_website(url)
 
             if url in seen_urls:
+
                 continue
 
             seen_urls.add(url)
@@ -549,54 +858,85 @@ def search_preschools(
                 result.get("body", "")
             )
 
+            title = clean_text(
+                result.get("title", "")
+            )
+
+            # Extract website information
+
             page = extract_page(url)
 
             combined_text = (
-                page["name"] + " " +
+
+                title + " " +
                 snippet + " " +
-                page["page_text"]
+                page["text"] + " " +
+                page["address"] + " " +
+                page["name"]
+
             )
 
-            if not is_preschool_relevant(combined_text):
+            # Validate preschool and location
+
+            if not preschool_validation(
+
+                combined_text,
+                locality,
+                district,
+                state
+
+            ):
+
                 continue
 
-            # Identify preschool name
+            # Prefer actual business name
 
-            name = page["name"]
+            name = clean_name(
+                page["name"]
+            )
 
             if not name:
 
-                name = get_domain_name(url)
-
-                name = name.replace(
-                    ".com",
-                    ""
-                ).replace(
-                    ".in",
-                    ""
-                ).replace(
-                    "-",
-                    " "
-                ).title()
-
-            name = clean_preschool_name(name)
+                name = clean_name(title)
 
             if not name:
+
                 continue
 
-            # Extract phone numbers
+            # Reject generic article titles
+
+            generic_names = [
+
+                "what is montessori",
+                "montessori education",
+                "best preschools",
+                "preschool admission",
+                "kindergarten registration",
+                "preschool meaning"
+
+            ]
+
+            if normalize(name) in generic_names:
+
+                continue
+
+            # Phone
 
             phones = page["phones"]
 
-            primary_phone = (
-                phones[0] if len(phones) > 0 else ""
+            phone = (
+                phones[0]
+                if len(phones) > 0
+                else ""
             )
 
-            alternate_phone = (
-                phones[1] if len(phones) > 1 else ""
+            alternate = (
+                phones[1]
+                if len(phones) > 1
+                else ""
             )
 
-            # Use branch address information only when available
+            # Branch address
 
             address = page["address"]
 
@@ -610,33 +950,55 @@ def search_preschools(
 
             pincode = page["pincode"]
 
-            # Deduplicate using name and address.
-            # Do not merge different branches merely because
-            # they belong to the same preschool brand.
+            # Only use locality input after location validation
+
+            if not actual_locality and locality:
+
+                if normalize(locality) in normalize(combined_text):
+
+                    actual_locality = locality
+
+            # Fill country only if the location is validated
+
+            if not actual_country and country:
+
+                actual_country = country
+
+            # Branch key
 
             branch_key = (
-                name.lower(),
-                address.lower()
+
+                normalize(name),
+
+                normalize(address),
+
+                phone
+
             )
 
             if branch_key in seen_branches:
+
                 continue
 
             seen_branches.add(branch_key)
+
+            # Identify branch name from structured data
+
+            branch = page["branch"]
 
             record = {
 
                 "Preschool Name": name,
 
-                "Branch Name": "",
+                "Branch Name": branch,
 
-                "Website": normalized_url,
+                "Website": website,
 
                 "Email": page["email"],
 
-                "Phone Number": primary_phone,
+                "Phone Number": phone,
 
-                "Alternate Phone": alternate_phone,
+                "Alternate Phone": alternate,
 
                 "Full Address": address,
 
@@ -650,9 +1012,7 @@ def search_preschools(
 
                 "Country": actual_country,
 
-                "Preschool Type": classify_preschool(
-                    combined_text
-                ),
+                "Preschool Type": "Preschool",
 
                 "Category": "Preschool",
 
@@ -660,29 +1020,31 @@ def search_preschools(
 
             }
 
-            found.append(record)
+            results.append(record)
 
-            time.sleep(0.3)
+            time.sleep(0.5)
 
-        progress_bar.progress(
+        progress.progress(
+
             min(
                 100,
                 int(
                     ((query_number + 1) / total_queries) * 100
                 )
             )
+
         )
 
-    progress_text.success(
-        f"Search completed. {len(found)} records discovered."
+    status.success(
+        f"Search completed. {len(results)} relevant records discovered."
     )
 
-    return found
+    return results
 
 
-# --------------------------------------------------
+# ==========================================
 # APPLICATION INTERFACE
-# --------------------------------------------------
+# ==========================================
 
 st.title("Rewyoo Preschool Finder")
 
@@ -691,14 +1053,13 @@ st.caption(
 )
 
 st.info(
-    "Search for preschools in any Indian locality, city, "
-    "district or state."
+    "Discover preschool businesses and their branches using public web sources."
 )
 
 
-# --------------------------------------------------
-# LOCATION INPUT
-# --------------------------------------------------
+# ==========================================
+# LOCATION
+# ==========================================
 
 st.subheader("1. Search Location")
 
@@ -744,57 +1105,58 @@ with col5:
     )
 
 
-# --------------------------------------------------
-# CATEGORY SELECTION
-# --------------------------------------------------
+# ==========================================
+# CATEGORY
+# ==========================================
 
 st.subheader("2. Preschool Categories")
 
 categories = st.multiselect(
 
-    "Select the types of preschools to discover",
+    "Select preschool categories",
 
     [
+
         "Preschool",
         "Playschool",
         "Montessori",
         "Nursery School",
         "Kindergarten",
         "Daycare and Preschool"
+
     ],
 
     default=[
+
         "Preschool",
         "Playschool",
         "Montessori",
         "Nursery School",
         "Kindergarten",
         "Daycare and Preschool"
+
     ]
+
 )
 
 st.caption(
-    "Search includes independent preschools, "
-    "branded chains, franchises and daycare-cum-preschools."
+    "All categories are selected by default."
 )
 
 
-# --------------------------------------------------
+# ==========================================
 # START SEARCH
-# --------------------------------------------------
+# ==========================================
 
 st.divider()
 
 st.subheader("3. Start Data Extraction")
 
-start = st.button(
+if st.button(
     "Start Preschool Search",
     type="primary",
     use_container_width=True
-)
-
-
-if start:
+):
 
     if not any([
         locality.strip(),
@@ -803,39 +1165,32 @@ if start:
     ]):
 
         st.error(
-            "Please enter at least a locality, district or state."
+            "Enter at least a locality, district or state."
         )
 
     elif not categories:
 
         st.error(
-            "Please select at least one preschool category."
+            "Select at least one preschool category."
         )
 
     else:
 
-        location_parts = [
-            locality.strip(),
-            district.strip(),
-            state.strip(),
-            country.strip()
-        ]
-
         location = ", ".join(
-            part
-            for part in location_parts
-            if part
+            x for x in [
+                locality,
+                district,
+                state,
+                country
+            ]
+            if x.strip()
         )
 
         try:
 
-            records = search_preschools(
+            new_records = search_preschools(
 
                 location=location,
-
-                selected_categories=categories,
-
-                limit=max_results,
 
                 locality=locality,
 
@@ -843,12 +1198,17 @@ if start:
 
                 state=state,
 
-                country=country
+                country=country,
+
+                categories=categories,
+
+                limit=max_results
 
             )
 
             combined = (
-                st.session_state.results + records
+                st.session_state.results
+                + new_records
             )
 
             df = pd.DataFrame(
@@ -856,14 +1216,11 @@ if start:
                 columns=FIELDS
             )
 
-            # Remove exact duplicate records
-
             df["_key"] = (
 
                 df["Preschool Name"]
                 .fillna("")
-                .str.lower()
-                .str.strip()
+                .apply(normalize)
 
                 + "|"
 
@@ -871,8 +1228,7 @@ if start:
 
                 df["Full Address"]
                 .fillna("")
-                .str.lower()
-                .str.strip()
+                .apply(normalize)
 
                 + "|"
 
@@ -880,8 +1236,6 @@ if start:
 
                 df["Phone Number"]
                 .fillna("")
-                .str.lower()
-                .str.strip()
 
             )
 
@@ -906,24 +1260,24 @@ if start:
 
                 "Location": location,
 
-                "Records Found": len(records)
+                "Records Found": len(new_records)
 
             })
 
             st.success(
-                f"Search completed. {len(records)} new records discovered."
+                f"{len(new_records)} new records discovered."
             )
 
         except Exception as error:
 
             st.error(
-                f"Search failed: {str(error)}"
+                f"Search failed: {error}"
             )
 
 
-# --------------------------------------------------
-# DATABASE DISPLAY
-# --------------------------------------------------
+# ==========================================
+# RESULTS
+# ==========================================
 
 st.divider()
 
@@ -946,8 +1300,6 @@ if st.session_state.results:
         use_container_width=True,
         hide_index=True
     )
-
-    # Excel export
 
     output = io.BytesIO()
 
@@ -974,7 +1326,7 @@ if st.session_state.results:
 
         for column in worksheet.columns:
 
-            max_length = max(
+            width = max(
                 len(str(cell.value or ""))
                 for cell in column
             )
@@ -982,13 +1334,13 @@ if st.session_state.results:
             worksheet.column_dimensions[
                 column[0].column_letter
             ].width = min(
-                max_length + 2,
+                width + 2,
                 40
             )
 
     st.download_button(
 
-        label="Download Preschool Data in Excel",
+        "Download Preschool Data in Excel",
 
         data=output.getvalue(),
 
@@ -1014,13 +1366,13 @@ if st.session_state.results:
 else:
 
     st.info(
-        "No records available yet. Start a search to discover preschools."
+        "No records available. Start a search."
     )
 
 
-# --------------------------------------------------
+# ==========================================
 # SEARCH HISTORY
-# --------------------------------------------------
+# ==========================================
 
 st.divider()
 
@@ -1028,12 +1380,10 @@ st.subheader("5. Search History")
 
 if st.session_state.history:
 
-    history_df = pd.DataFrame(
-        st.session_state.history
-    )
-
     st.dataframe(
-        history_df,
+        pd.DataFrame(
+            st.session_state.history
+        ),
         use_container_width=True,
         hide_index=True
     )
@@ -1041,16 +1391,12 @@ if st.session_state.history:
 else:
 
     st.caption(
-        "Search history is maintained during the current app session."
+        "Search history is available during the current session."
     )
 
-
-# --------------------------------------------------
-# FOOTER
-# --------------------------------------------------
 
 st.divider()
 
 st.caption(
-    "Rewyoo Preschool Finder | Public Web Discovery and Data Extraction"
+    "Rewyoo Preschool Finder | Preschool Discovery and Data Extraction"
 )
