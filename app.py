@@ -2,14 +2,12 @@ import streamlit as st
 import pandas as pd
 import requests
 import re
+import json
 import time
-
-from io import BytesIO
-
-
-# =====================================================
-# PAGE CONFIGURATION
-# =====================================================
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse
+from ddgs import DDGS
+from datetime import datetime
 
 st.set_page_config(
     page_title="Rewyoo Preschool Finder",
@@ -17,38 +15,67 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("Rewyoo Preschool Finder")
-st.caption("Verified preschool discovery across India")
-
-st.divider()
-
-
-# =====================================================
-# SEARCH CONFIGURATION
-# =====================================================
-
-st.subheader("Search Configuration")
-
-pincode = st.text_input(
-    "Enter Pincode",
-    placeholder="Example: 560066",
-    max_chars=6
-)
-
-st.text_input(
+FIELDS = [
+    "Preschool Name",
+    "Branch Name",
+    "Website",
+    "Email",
+    "Phone Number",
+    "Alternate Phone",
+    "Full Address",
+    "Locality",
+    "Pincode",
+    "District",
+    "State",
     "Country",
-    value="India",
-    disabled=True
+    "Preschool Type",
+    "Category",
+    "Established Year"
+]
+
+if "results" not in st.session_state:
+    st.session_state.results = []
+
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+st.title("Rewyoo Preschool Finder")
+st.caption("Preschool discovery, data extraction and Excel export across India")
+
+st.info(
+    "Search for preschools in any Indian locality, city, district or state. "
+    "The application extracts information available from public websites."
 )
 
-result_limit = st.selectbox(
-    "Maximum Records",
-    [5, 10, 25, 50, 100, 200, 300, 400, 500],
-    index=0
-)
+st.subheader("1. Search Location")
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    locality = st.text_input("Locality / Area", placeholder="Example: Whitefield")
+
+with col2:
+    district = st.text_input("District", placeholder="Example: Bengaluru Urban")
+
+with col3:
+    state = st.text_input("State", placeholder="Example: Karnataka")
+
+col4, col5 = st.columns(2)
+
+with col4:
+    country = st.text_input("Country", value="India")
+
+with col5:
+    max_results = st.selectbox(
+        "Maximum search results per search category",
+        [10, 20, 30, 40],
+        index=1
+    )
+
+st.subheader("2. Preschool Categories")
 
 categories = st.multiselect(
-    "Preschool Categories",
+    "Select the types of preschools to discover",
     [
         "Preschool",
         "Playschool",
@@ -67,664 +94,396 @@ categories = st.multiselect(
     ]
 )
 
-st.divider()
+st.caption(
+    "The search includes independent centres, branded chains and franchise branches."
+)
 
+def clean_text(value):
+    if not value:
+        return ""
+    return re.sub(r"\s+", " ", str(value)).strip()
 
-# =====================================================
-# HTTP SESSION
-# =====================================================
+def extract_jsonld(soup):
+    data = []
 
-session = requests.Session()
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            parsed = json.loads(script.string or script.get_text())
+            if isinstance(parsed, list):
+                data.extend(parsed)
+            else:
+                data.append(parsed)
+        except Exception:
+            continue
 
-session.headers.update({
-    "User-Agent": "RewyooPreschoolFinder/1.0 (educational business directory)"
-})
+    return data
 
+def flatten_json(data):
+    items = []
 
-# =====================================================
-# PINCODE VALIDATION
-# =====================================================
+    def walk(obj):
+        if isinstance(obj, dict):
+            items.append(obj)
+            for value in obj.values():
+                walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                walk(value)
 
-def get_pincode_details(pin):
+    walk(data)
+    return items
 
-    url = (
-        "https://api.pincodeapi.in/"
-        f"api/v1/pincode/{pin}"
-    )
+def get_address(items):
+    for item in items:
+        address = item.get("address")
+
+        if isinstance(address, dict):
+            parts = [
+                address.get("streetAddress", ""),
+                address.get("addressLocality", ""),
+                address.get("addressRegion", ""),
+                address.get("postalCode", ""),
+                address.get("addressCountry", "")
+            ]
+            result = ", ".join(clean_text(x) for x in parts if x)
+            if result:
+                return result
+
+        elif isinstance(address, str) and address.strip():
+            return clean_text(address)
+
+    return ""
+
+def extract_page(url):
+    details = {
+        "Website": url,
+        "Email": "",
+        "Phone Number": "",
+        "Alternate Phone": "",
+        "Full Address": "",
+        "Pincode": "",
+        "Established Year": "",
+        "Page Title": "",
+        "Page Text": ""
+    }
 
     try:
-
-        response = session.get(
-            url,
-            timeout=20
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        if not data.get("success"):
-            return None
-
-        postal_data = data.get("data", {})
-
-        offices = postal_data.get(
-            "post_offices",
-            []
-        )
-
-        if not offices:
-            return None
-
-        district = ""
-        state = ""
-
-        for office in offices:
-
-            district = (
-                office.get("district")
-                or district
-            )
-
-            state = (
-                office.get("state")
-                or state
-            )
-
-        if not district or not state:
-            return None
-
-        return {
-            "district": district,
-            "state": state,
-            "offices": offices
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; RewyooPreschoolFinder/1.0)"
         }
 
-    except Exception as error:
-
-        st.error(
-            f"PIN code validation service error: {error}"
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=12
         )
 
-        return None
+        if response.status_code != 200:
+            return details
 
+        soup = BeautifulSoup(response.text, "html.parser")
 
-# =====================================================
-# CATEGORY KEYWORD MAPPING
-# =====================================================
-
-CATEGORY_KEYWORDS = {
-
-    "Preschool": [
-        "preschool",
-        "pre-school",
-        "pre school"
-    ],
-
-    "Playschool": [
-        "playschool",
-        "play school",
-        "play-school"
-    ],
-
-    "Montessori": [
-        "montessori"
-    ],
-
-    "Nursery School": [
-        "nursery school",
-        "nursery"
-    ],
-
-    "Kindergarten": [
-        "kindergarten",
-        "kindergarden"
-    ],
-
-    "Daycare and Preschool": [
-        "daycare",
-        "day care",
-        "child care",
-        "childcare"
-    ]
-}
-
-
-# =====================================================
-# PRESCHOOL CLASSIFICATION
-# =====================================================
-
-def identify_categories(tags, selected_categories):
-
-    name = tags.get("name", "").lower()
-
-    combined = " ".join([
-        name,
-        tags.get("description", "").lower(),
-        tags.get("operator", "").lower()
-    ])
-
-    matched = []
-
-    for category in selected_categories:
-
-        keywords = CATEGORY_KEYWORDS.get(
-            category,
-            []
+        details["Page Title"] = clean_text(
+            soup.title.get_text() if soup.title else ""
         )
 
-        if any(
-            keyword in combined
-            for keyword in keywords
-        ):
+        for tag in soup(["script", "style", "noscript", "header", "footer"]):
+            tag.decompose()
 
-            matched.append(category)
+        page_text = clean_text(soup.get_text(" ", strip=True))
+        details["Page Text"] = page_text[:12000]
 
-    # OSM kindergarten and childcare classifications
-    amenity = tags.get("amenity", "").lower()
-    childcare = tags.get("childcare", "").lower()
+        emails = list(set(re.findall(
+            r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+            response.text
+        )))
 
-    if amenity == "kindergarten":
+        emails = [
+            email for email in emails
+            if not any(x in email.lower() for x in [
+                "example.com", "domain.com", ".png", ".jpg"
+            ])
+        ]
 
-        if "Kindergarten" in selected_categories:
-            matched.append("Kindergarten")
+        if emails:
+            details["Email"] = emails[0]
 
-    if childcare in ["yes", "kindergarten"]:
+        phones = list(set(re.findall(
+            r"(?:\+91[\s-]?)?[6-9]\d{9}",
+            page_text
+        )))
 
-        if "Daycare and Preschool" in selected_categories:
-            matched.append("Daycare and Preschool")
+        phones = [re.sub(r"\D", "", p) for p in phones]
+        phones = list(dict.fromkeys(phones))
 
-    return list(set(matched))
+        if len(phones) > 0:
+            details["Phone Number"] = phones[0]
 
+        if len(phones) > 1:
+            details["Alternate Phone"] = phones[1]
 
-# =====================================================
-# ADDRESS EXTRACTION
-# =====================================================
+        json_items = flatten_json(extract_jsonld(soup))
 
-def build_address(tags):
+        details["Full Address"] = get_address(json_items)
 
-    parts = []
+        pincode = re.search(r"\b[1-8]\d{5}\b", page_text)
+        if pincode:
+            details["Pincode"] = pincode.group(0)
 
-    address_fields = [
-        "addr:housenumber",
-        "addr:building",
-        "addr:street",
-        "addr:suburb",
-        "addr:neighbourhood",
-        "addr:city",
-        "addr:district",
-        "addr:postcode"
-    ]
+        for item in json_items:
+            if item.get("foundingDate"):
+                year = re.search(r"\b(19|20)\d{2}\b", str(item["foundingDate"]))
+                if year:
+                    details["Established Year"] = year.group(0)
+                    break
 
-    for field in address_fields:
+        return details
 
-        value = tags.get(field, "").strip()
+    except Exception:
+        return details
 
-        if value and value not in parts:
-            parts.append(value)
+def classify_preschool(text):
+    text = text.lower()
 
-    return ", ".join(parts)
+    if "montessori" in text:
+        return "Montessori"
+    if "daycare" in text or "day care" in text:
+        return "Daycare and Preschool"
+    if "kindergarten" in text:
+        return "Kindergarten"
+    if "nursery" in text:
+        return "Nursery School"
+    if "playschool" in text or "play school" in text:
+        return "Playschool"
 
+    return "Preschool"
 
-# =====================================================
-# CONTACT EXTRACTION
-# =====================================================
+def extract_name(title, url):
+    title = clean_text(title)
 
-def extract_phone(tags):
+    if title:
+        for separator in [" | ", " - ", " – ", " — ", " : "]:
+            if separator in title:
+                title = title.split(separator)[0].strip()
 
-    phone = (
-        tags.get("contact:phone")
-        or tags.get("phone")
-        or ""
-    )
+        return title[:120]
 
-    return phone.strip()
+    domain = urlparse(url).netloc.replace("www.", "")
+    return domain.split(".")[0].replace("-", " ").title()
 
+def search_preschools(location, selected_categories, limit):
+    found = []
+    seen_urls = set()
 
-def extract_email(tags):
+    with DDGS() as ddgs:
+        for category in selected_categories:
 
-    email = (
-        tags.get("contact:email")
-        or tags.get("email")
-        or ""
-    )
+            query = f"{category} in {location} India"
 
-    return email.strip()
+            try:
+                search_results = list(
+                    ddgs.text(query, max_results=limit)
+                )
+            except Exception:
+                search_results = []
 
+            for result in search_results:
 
-def extract_website(tags):
+                url = result.get("href", "")
 
-    website = (
-        tags.get("contact:website")
-        or tags.get("website")
-        or ""
-    )
+                if not url.startswith("http"):
+                    continue
 
-    return website.strip()
+                domain = urlparse(url).netloc.lower()
 
+                if any(x in domain for x in [
+                    "facebook.com",
+                    "instagram.com",
+                    "youtube.com",
+                    "linkedin.com",
+                    "justdial.com",
+                    "sulekha.com"
+                ]):
+                    continue
 
-# =====================================================
-# EXACT PINCODE SEARCH
-# =====================================================
+                if url in seen_urls:
+                    continue
 
-def search_preschools(
-    pin,
-    district,
-    state,
-    selected_categories,
-    limit
-):
+                seen_urls.add(url)
 
-    overpass_servers = [
-        "https://overpass-api.de/api/interpreter",
-        "https://overpass.kumi.systems/api/interpreter"
-    ]
+                page = extract_page(url)
 
-    query = f"""
-    [out:json][timeout:60];
+                title = page.get("Page Title", "")
+                snippet = clean_text(result.get("body", ""))
 
-    (
-      nwr["addr:postcode"="{pin}"]["amenity"="kindergarten"];
-      nwr["addr:postcode"="{pin}"]["amenity"="childcare"];
-      nwr["addr:postcode"="{pin}"]["name"~"preschool|pre-school|playschool|play school|montessori|nursery|kindergarten|daycare|day care",i];
-      nwr["addr:postcode"="{pin}"]["office"="educational_institution"]["name"~"preschool|pre-school|playschool|montessori|nursery|kindergarten",i];
-    );
+                name = extract_name(title, url)
 
-    out center tags;
-    """
+                combined_text = (
+                    name + " " + snippet + " " +
+                    page.get("Page Text", "")
+                )
 
-    data = None
-    last_error = None
+                if not any(word in combined_text.lower() for word in [
+                    "preschool",
+                    "pre-school",
+                    "playschool",
+                    "play school",
+                    "montessori",
+                    "kindergarten",
+                    "nursery",
+                    "daycare",
+                    "day care"
+                ]):
+                    continue
 
-    for server in overpass_servers:
+                address = page.get("Full Address", "")
+
+                found.append({
+                    "Preschool Name": name,
+                    "Branch Name": "",
+                    "Website": url,
+                    "Email": page.get("Email", ""),
+                    "Phone Number": page.get("Phone Number", ""),
+                    "Alternate Phone": page.get("Alternate Phone", ""),
+                    "Full Address": address,
+                    "Locality": locality,
+                    "Pincode": page.get("Pincode", ""),
+                    "District": district,
+                    "State": state,
+                    "Country": country,
+                    "Preschool Type": classify_preschool(combined_text),
+                    "Category": "Preschool",
+                    "Established Year": page.get("Established Year", "")
+                })
+
+                time.sleep(0.5)
+
+    return found
+
+st.divider()
+st.subheader("3. Start Data Extraction")
+
+start = st.button(
+    "Start Preschool Search",
+    type="primary",
+    use_container_width=True
+)
+
+if start:
+
+    if not any([locality.strip(), district.strip(), state.strip()]):
+        st.error("Please enter at least a locality, district or state.")
+    elif not categories:
+        st.error("Please select at least one preschool category.")
+    else:
+
+        location_parts = [
+            locality.strip(),
+            district.strip(),
+            state.strip(),
+            country.strip()
+        ]
+
+        location = ", ".join(x for x in location_parts if x)
+
+        progress = st.progress(0)
+        status = st.empty()
+
+        status.write("Searching public websites. Please wait...")
 
         try:
-
-            response = session.post(
-                server,
-                data={"data": query},
-                timeout=90
+            records = search_preschools(
+                location,
+                categories,
+                max_results
             )
 
-            response.raise_for_status()
+            progress.progress(100)
 
-            data = response.json()
+            existing = st.session_state.results
 
-            break
+            combined = existing + records
+
+            df = pd.DataFrame(combined, columns=FIELDS)
+
+            df["_key"] = (
+                df["Preschool Name"].str.lower().fillna("") + "|" +
+                df["Website"].str.lower().fillna("")
+            )
+
+            df = df.drop_duplicates(subset="_key", keep="first")
+            df = df.drop(columns=["_key"])
+
+            st.session_state.results = df.to_dict("records")
+
+            st.session_state.history.append({
+                "Search Date": datetime.now().strftime("%d-%m-%Y %H:%M"),
+                "Location": location,
+                "Records Found": len(records)
+            })
+
+            status.success(
+                f"Search completed. {len(records)} records discovered."
+            )
 
         except Exception as error:
+            st.error(f"Search could not be completed: {error}")
 
-            last_error = error
-            time.sleep(2)
+st.divider()
+st.subheader("4. Extracted Preschool Database")
 
-    if data is None:
+if st.session_state.results:
 
-        raise Exception(
-            f"OpenStreetMap search service unavailable: {last_error}"
-        )
+    df = pd.DataFrame(st.session_state.results, columns=FIELDS)
 
-    elements = data.get("elements", [])
+    st.metric("Total Preschool Records", len(df))
 
-    records = []
-    seen = set()
-
-    for element in elements:
-
-        if len(records) >= limit:
-            break
-
-        tags = element.get("tags", {})
-
-        name = tags.get("name", "").strip()
-
-        if not name:
-            continue
-
-        # Exact postcode validation
-        result_pin = (
-            tags.get("addr:postcode", "")
-            .strip()
-        )
-
-        if result_pin != pin:
-            continue
-
-        # Check country where available
-        country = tags.get(
-            "addr:country",
-            ""
-        ).strip().lower()
-
-        if country and country not in ["in", "india"]:
-            continue
-
-        # Check state where available
-        result_state = tags.get(
-            "addr:state",
-            ""
-        ).strip().lower()
-
-        if result_state:
-
-            if (
-                "karnataka" not in result_state
-                and "karnataka" in state.lower()
-            ):
-                continue
-
-        matched_categories = identify_categories(
-            tags,
-            selected_categories
-        )
-
-        if not matched_categories:
-            continue
-
-        element_type = element.get("type", "")
-        element_id = element.get("id", "")
-
-        unique_id = f"{element_type}_{element_id}"
-
-        if unique_id in seen:
-            continue
-
-        seen.add(unique_id)
-
-        address = build_address(tags)
-
-        latitude = ""
-        longitude = ""
-
-        if "lat" in element:
-            latitude = element.get("lat", "")
-            longitude = element.get("lon", "")
-
-        elif "center" in element:
-
-            center = element.get("center", {})
-
-            latitude = center.get("lat", "")
-            longitude = center.get("lon", "")
-
-        locality = (
-            tags.get("addr:suburb")
-            or tags.get("addr:neighbourhood")
-            or tags.get("addr:city")
-            or ""
-        )
-
-        records.append({
-
-            "Preschool Name": name,
-
-            "Branch Name": tags.get(
-                "branch",
-                ""
-            ),
-
-            "Website": extract_website(tags),
-
-            "Email": extract_email(tags),
-
-            "Phone Number": extract_phone(tags),
-
-            "Alternate Phone": tags.get(
-                "contact:phone:alternate",
-                ""
-            ),
-
-            "Full Address": address,
-
-            "Locality": locality,
-
-            "Pincode": pin,
-
-            "District": district,
-
-            "State": state,
-
-            "Country": "India",
-
-            "Preschool Type": ", ".join(
-                matched_categories
-            ),
-
-            "Category": ", ".join(
-                matched_categories
-            ),
-
-            "Established Year": tags.get(
-                "start_date",
-                ""
-            ),
-
-            "Latitude": latitude,
-
-            "Longitude": longitude,
-
-            "Source": (
-                f"https://www.openstreetmap.org/"
-                f"{element_type}/{element_id}"
-            )
-
-        })
-
-    return records
-
-
-# =====================================================
-# EXCEL GENERATION
-# =====================================================
-
-def create_excel(records):
-
-    columns = [
-        "Preschool Name",
-        "Branch Name",
-        "Website",
-        "Email",
-        "Phone Number",
-        "Alternate Phone",
-        "Full Address",
-        "Locality",
-        "Pincode",
-        "District",
-        "State",
-        "Country",
-        "Preschool Type",
-        "Category",
-        "Established Year",
-        "Latitude",
-        "Longitude",
-        "Source"
-    ]
-
-    df = pd.DataFrame(
-        records,
-        columns=columns
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True
     )
 
-    output = BytesIO()
+    excel_data = None
 
-    with pd.ExcelWriter(
-        output,
-        engine="openpyxl"
-    ) as writer:
+    import io
+    output = io.BytesIO()
 
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(
             writer,
             index=False,
             sheet_name="Preschool Data"
         )
 
-        worksheet = writer.sheets[
-            "Preschool Data"
-        ]
+    excel_data = output.getvalue()
 
-        worksheet.freeze_panes = "A2"
+    st.download_button(
+        label="Download Preschool Data in Excel",
+        data=excel_data,
+        file_name="Rewyoo_Preschool_Database.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+        use_container_width=True
+    )
 
-        worksheet.auto_filter.ref = (
-            worksheet.dimensions
-        )
+    if st.button("Clear Current Results"):
+        st.session_state.results = []
+        st.rerun()
 
-        for column_cells in worksheet.columns:
-
-            max_length = max(
-                len(str(cell.value or ""))
-                for cell in column_cells
-            )
-
-            worksheet.column_dimensions[
-                column_cells[0].column_letter
-            ].width = min(
-                max_length + 3,
-                45
-            )
-
-    output.seek(0)
-
-    return output
-
-
-# =====================================================
-# START SEARCH
-# =====================================================
-
-if st.button(
-    "Start Preschool Search",
-    type="primary",
-    use_container_width=True
-):
-
-    if (
-        not pincode.isdigit()
-        or len(pincode) != 6
-        or pincode[0] == "0"
-    ):
-
-        st.error(
-            "Please enter a valid six-digit Indian PIN code."
-        )
-
-    elif not categories:
-
-        st.error(
-            "Please select at least one preschool category."
-        )
-
-    else:
-
-        with st.spinner(
-            "Validating PIN code..."
-        ):
-
-            pin_details = get_pincode_details(
-                pincode
-            )
-
-        if not pin_details:
-
-            st.error(
-                "Unable to validate the PIN code. "
-                "Please try again later."
-            )
-
-        else:
-
-            district = pin_details["district"]
-            state = pin_details["state"]
-
-            st.success(
-                f"PIN code verified: {district}, {state}, India"
-            )
-
-            st.info(
-                "Searching OpenStreetMap for preschool listings "
-                "with the exact PIN code."
-            )
-
-            try:
-
-                with st.spinner(
-                    "Searching and verifying preschool locations..."
-                ):
-
-                    records = search_preschools(
-                        pincode,
-                        district,
-                        state,
-                        categories,
-                        result_limit
-                    )
-
-                if records:
-
-                    df = pd.DataFrame(records)
-
-                    st.success(
-                        f"Found {len(records)} matching "
-                        "preschool listings."
-                    )
-
-                    st.subheader("Preschool Search Results")
-
-                    st.dataframe(
-                        df,
-                        use_container_width=True,
-                        hide_index=True
-                    )
-
-                    excel_file = create_excel(
-                        records
-                    )
-
-                    st.download_button(
-                        label="Download Excel",
-                        data=excel_file,
-                        file_name=(
-                            f"Rewyoo_Preschools_{pincode}.xlsx"
-                        ),
-                        mime=(
-                            "application/vnd.openxmlformats-officedocument."
-                            "spreadsheetml.sheet"
-                        ),
-                        type="primary",
-                        use_container_width=True
-                    )
-
-                else:
-
-                    st.warning(
-                        "No matching preschool records were found "
-                        "with this exact PIN code in OpenStreetMap."
-                    )
-
-                    st.info(
-                        "This does not necessarily mean there are "
-                        "no preschools in this area. The listings "
-                        "may not be available in the open database."
-                    )
-
-            except Exception as error:
-
-                st.error(
-                    "Search could not be completed."
-                )
-
-                st.caption(str(error))
-
-
-# =====================================================
-# FOOTER
-# =====================================================
+else:
+    st.info("No records available yet. Start a search to discover preschools.")
 
 st.divider()
+st.subheader("5. Search History")
+
+if st.session_state.history:
+    history_df = pd.DataFrame(st.session_state.history)
+    st.dataframe(history_df, use_container_width=True, hide_index=True)
+else:
+    st.caption("Your searches will appear here during the current app session.")
 
 st.caption(
-    "Rewyoo Preschool Finder | India"
-)
-
-st.caption(
-    "Location source: OpenStreetMap. "
-    "Postal validation: Pincode API."
+    "Rewyoo Preschool Finder | Initial Version | "
+    "Public web discovery and data extraction"
 )
