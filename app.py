@@ -13,9 +13,9 @@ from ddgs import DDGS
 from datetime import datetime
 
 
-# ==================================================
-# APPLICATION CONFIGURATION
-# ==================================================
+# =====================================================
+# CONFIGURATION
+# =====================================================
 
 st.set_page_config(
     page_title="Rewyoo Preschool Finder",
@@ -67,7 +67,8 @@ BLOCKED_DOMAINS = [
     "quora.com",
     "medium.com",
     "wordpress.com",
-    "blogspot.com"
+    "blogspot.com",
+    "glassdoor.com"
 ]
 
 ARTICLE_WORDS = [
@@ -80,9 +81,6 @@ ARTICLE_WORDS = [
     "history of",
     "theory",
     "method guide",
-    "top 10",
-    "best schools",
-    "best preschool",
     "how to",
     "blog",
     "article",
@@ -91,7 +89,7 @@ ARTICLE_WORDS = [
     "comparison"
 ]
 
-PRESCHOOL_WORDS = [
+PRESCHOOL_TERMS = [
     "preschool",
     "pre-school",
     "playschool",
@@ -106,47 +104,50 @@ PRESCHOOL_WORDS = [
     "child care"
 ]
 
+BUSINESS_INDICATORS = [
+    "admission",
+    "admissions",
+    "contact us",
+    "our centres",
+    "our centers",
+    "our branches",
+    "visit us",
+    "enrol",
+    "enroll",
+    "fees",
+    "school hours",
+    "location",
+    "campus"
+]
+
 st.session_state.setdefault("results", [])
 st.session_state.setdefault("history", [])
 
 
-# ==================================================
-# TEXT UTILITIES
-# ==================================================
+# =====================================================
+# UTILITIES
+# =====================================================
 
-def clean_text(value):
+def clean(value):
 
     if not value:
         return ""
 
-    value = html.unescape(str(value))
-
     return re.sub(
         r"\s+",
         " ",
-        value
+        html.unescape(str(value))
     ).strip()
 
 
-def get_domain(url):
+def domain_of(url):
 
     return urlparse(url).netloc.lower().replace(
-        "www.",
-        ""
+        "www.", ""
     )
 
 
-def is_blocked(url):
-
-    domain = get_domain(url)
-
-    return any(
-        blocked in domain
-        for blocked in BLOCKED_DOMAINS
-    )
-
-
-def normalise_url(url):
+def clean_url(url):
 
     parsed = urlparse(url)
 
@@ -158,9 +159,23 @@ def normalise_url(url):
     )
 
 
-def is_article_url(url):
+def blocked(url):
 
+    domain = domain_of(url)
+
+    return any(
+        item in domain
+        for item in BLOCKED_DOMAINS
+    )
+
+
+def article_page(title, url):
+
+    title = title.lower()
     path = urlparse(url).path.lower()
+
+    if any(word in title for word in ARTICLE_WORDS):
+        return True
 
     article_paths = [
         "/blog/",
@@ -170,9 +185,7 @@ def is_article_url(url):
         "/news/",
         "/what-is-",
         "/guide/",
-        "/guides/",
-        "/history/",
-        "/definition/"
+        "/guides/"
     ]
 
     return any(
@@ -181,84 +194,137 @@ def is_article_url(url):
     )
 
 
-def contains_preschool_terms(text):
-
-    text = text.lower()
-
-    return any(
-        word in text
-        for word in PRESCHOOL_WORDS
-    )
-
-
-# ==================================================
+# =====================================================
 # LOCATION VALIDATION
-# ==================================================
+# =====================================================
 
-def location_matches(text, locality, district, state):
+def location_terms(city, district, state):
+
+    terms = []
+
+    for value in [city, district, state]:
+
+        value = value.strip().lower()
+
+        if value:
+            terms.append(value)
+
+    # Bengaluru / Bangalore spelling variation.
+
+    if city.lower().strip() == "bengaluru":
+        terms.append("bangalore")
+
+    if city.lower().strip() == "bangalore":
+        terms.append("bengaluru")
+
+    return list(set(terms))
+
+
+def validate_location(
+    text,
+    locality,
+    city,
+    district,
+    state,
+    country,
+    pincode
+):
 
     text = text.lower()
 
     locality = locality.lower().strip()
-    district = district.lower().strip()
+    city = city.lower().strip()
     state = state.lower().strip()
+    country = country.lower().strip()
 
-    # Whitefield is mandatory when searching Whitefield.
+    # Country validation.
+
+    if country == "india":
+
+        india_evidence = [
+            "india",
+            "indian",
+            "karnataka",
+            "bengaluru",
+            "bangalore",
+            "+91"
+        ]
+
+        has_india_evidence = any(
+            item in text
+            for item in india_evidence
+        )
+
+        if not has_india_evidence:
+            return False
+
+    # Locality must match.
 
     if locality:
 
-        locality_variants = [
+        variations = [
             locality,
             locality.replace(" ", ""),
             locality.replace(" ", "-")
         ]
 
-        locality_found = any(
-            value in text
-            for value in locality_variants
-        )
+        if not any(
+            item in text
+            for item in variations
+        ):
 
-        # Known spelling variations.
+            if locality == "whitefield":
 
-        if locality == "whitefield":
+                if "white field" not in text:
+                    return False
 
-            locality_found = (
-                locality_found
-                or "white field" in text
-            )
+            else:
+                return False
 
-        if not locality_found:
-            return False
+    # City validation.
 
-    # Bengaluru / Bangalore variations.
+    if city:
 
-    if district:
-
-        district_variants = [
-            district,
-            district.replace("bengaluru", "bangalore"),
-            district.replace("bangalore", "bengaluru")
+        city_variations = [
+            city,
+            city.replace("bengaluru", "bangalore"),
+            city.replace("bangalore", "bengaluru")
         ]
 
-        district_found = any(
-            value in text
-            for value in district_variants
-        )
-
-        if not district_found:
+        if not any(
+            item in text
+            for item in city_variations
+        ):
             return False
+
+    # State validation.
 
     if state and state not in text:
         return False
 
+    # Exact pincode validation when supplied.
+
+    if pincode:
+
+        pin_match = re.search(
+            r"\b\d{6}\b",
+            text
+        )
+
+        if not pin_match:
+            return False
+
+        if pincode not in text:
+            return False
+
     return True
 
 
-# ==================================================
-# STRUCTURED WEBSITE DATA
-# ==================================================
+# =====================================================
+# STRUCTURED DATA
+# =====================================================
 
-def get_jsonld(soup):
+def extract_jsonld(soup):
 
     records = []
 
@@ -269,11 +335,11 @@ def get_jsonld(soup):
 
         try:
 
-            parsed = json.loads(
+            data = json.loads(
                 script.string or script.get_text()
             )
 
-            records.append(parsed)
+            records.append(data)
 
         except Exception:
             continue
@@ -281,7 +347,7 @@ def get_jsonld(soup):
     return records
 
 
-def flatten_json(data):
+def flatten(data):
 
     records = []
 
@@ -296,17 +362,17 @@ def flatten_json(data):
 
         elif isinstance(obj, list):
 
-            for value in obj:
-                walk(value)
+            for item in obj:
+                walk(item)
 
     walk(data)
 
     return records
 
 
-def get_organisation_name(items):
+def organisation_name(items):
 
-    accepted_types = [
+    allowed = [
         "preschool",
         "school",
         "educationalorganization",
@@ -317,19 +383,17 @@ def get_organisation_name(items):
 
     for item in items:
 
-        item_type = item.get("@type", "")
+        typ = item.get("@type", "")
 
-        if isinstance(item_type, list):
-            item_type = " ".join(item_type)
-
-        item_type = str(item_type).lower()
+        if isinstance(typ, list):
+            typ = " ".join(typ)
 
         if any(
-            word in item_type
-            for word in accepted_types
+            word in str(typ).lower()
+            for word in allowed
         ):
 
-            name = clean_text(
+            name = clean(
                 item.get("name", "")
             )
 
@@ -339,7 +403,7 @@ def get_organisation_name(items):
     return ""
 
 
-def get_structured_address(items):
+def structured_address(items):
 
     for item in items:
 
@@ -355,46 +419,43 @@ def get_structured_address(items):
                 address.get("addressCountry", "")
             ]
 
-            address_text = ", ".join(
-                clean_text(x)
-                for x in parts
-                if x
+            result = ", ".join(
+                clean(part)
+                for part in parts
+                if part
             )
 
-            if address_text:
-                return address_text
+            if result:
+                return result
 
         elif isinstance(address, str):
 
-            return clean_text(address)
+            if address:
+                return clean(address)
 
     return ""
 
 
-# ==================================================
-# CONTACT INFORMATION
-# ==================================================
+# =====================================================
+# CONTACT EXTRACTION
+# =====================================================
 
 def extract_email(text):
 
-    emails = re.findall(
+    matches = re.findall(
         r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
         text
     )
 
-    emails = list(dict.fromkeys(emails))
-
-    invalid = [
-        "example.com",
-        "domain.com",
-        "email.com"
-    ]
-
-    for email in emails:
+    for email in dict.fromkeys(matches):
 
         if not any(
-            value in email.lower()
-            for value in invalid
+            item in email.lower()
+            for item in [
+                "example.com",
+                "domain.com",
+                "email.com"
+            ]
         ):
 
             return email
@@ -411,12 +472,12 @@ def extract_phones(text):
 
     numbers = []
 
-    for match in matches:
+    for value in matches:
 
         number = re.sub(
             r"\D",
             "",
-            match
+            value
         )
 
         if len(number) == 12 and number.startswith("91"):
@@ -430,47 +491,38 @@ def extract_phones(text):
     return numbers
 
 
-# ==================================================
+# =====================================================
 # ESTABLISHED YEAR
-# ==================================================
+# =====================================================
 
-def extract_established_year(text, items):
+def extract_year(text, items):
 
     current_year = datetime.now().year
 
-    # Structured founding date.
-
     for item in items:
 
-        for key in [
-            "foundingDate",
-            "dateCreated"
-        ]:
+        value = str(
+            item.get("foundingDate", "")
+        )
 
-            value = str(
-                item.get(key, "")
-            )
+        match = re.search(
+            r"\b(?:19|20)\d{2}\b",
+            value
+        )
 
-            match = re.search(
-                r"\b(?:19|20)\d{2}\b",
-                value
-            )
+        if match:
 
-            if match:
+            year = int(match.group())
 
-                year = int(match.group())
-
-                if 1900 <= year <= current_year:
-                    return str(year)
+            if 1900 <= year <= current_year:
+                return str(year)
 
     patterns = [
-        r"established\s+(?:in\s+)?(?:the\s+year\s+)?((?:19|20)\d{2})",
+        r"established\s+(?:in\s+)?((?:19|20)\d{2})",
         r"founded\s+(?:in\s+)?((?:19|20)\d{2})",
         r"since\s+((?:19|20)\d{2})",
         r"started\s+(?:in\s+)?((?:19|20)\d{2})",
-        r"incorporated\s+(?:in\s+)?((?:19|20)\d{2})",
-        r"establishment\s+year\s*[:\-]?\s*((?:19|20)\d{2})",
-        r"our\s+journey\s+began\s+in\s+((?:19|20)\d{2})"
+        r"incorporated\s+(?:in\s+)?((?:19|20)\d{2})"
     ]
 
     for pattern in patterns:
@@ -491,64 +543,16 @@ def extract_established_year(text, items):
     return ""
 
 
-# ==================================================
-# BRANCH INFORMATION
-# ==================================================
+# =====================================================
+# PRESCHOOL IDENTIFICATION
+# =====================================================
 
-def extract_branch_name(
-    items,
-    address,
-    locality
-):
-
-    for item in items:
-
-        for key in [
-            "branchName",
-            "locationName"
-        ]:
-
-            value = clean_text(
-                item.get(key, "")
-            )
-
-            if value:
-                return value
-
-    if address:
-
-        parts = [
-            clean_text(part)
-            for part in address.split(",")
-            if clean_text(part)
-        ]
-
-        if parts:
-
-            # Avoid copying the entire street address
-            # into the branch name.
-
-            if len(parts) >= 2:
-                return parts[-2]
-
-            return parts[0]
-
-    return locality
-
-
-# ==================================================
-# PRESCHOOL NAME
-# ==================================================
-
-def extract_preschool_name(
-    title,
-    structured_name
-):
+def preschool_name(title, structured_name):
 
     if structured_name:
         return structured_name
 
-    title = clean_text(title)
+    title = clean(title)
 
     for separator in [
         " | ",
@@ -561,17 +565,37 @@ def extract_preschool_name(
         if separator in title:
             title = title.split(separator)[0].strip()
 
-    if title and len(title) < 120:
-        return title
+    if not title or len(title) > 100:
+        return ""
 
-    return ""
+    return title
 
 
-# ==================================================
-# PRESCHOOL CATEGORY
-# ==================================================
+def branch_name(items, address, locality):
 
-def classify_preschool(text):
+    for item in items:
+
+        for key in [
+            "branchName",
+            "locationName"
+        ]:
+
+            value = clean(
+                item.get(key, "")
+            )
+
+            if value:
+                return value
+
+    # Do not invent a branch name from an address.
+
+    # Use the locality only when no branch-specific
+    # information is available.
+
+    return locality
+
+
+def preschool_type(text):
 
     text = text.lower()
 
@@ -593,18 +617,18 @@ def classify_preschool(text):
     return "Preschool"
 
 
-# ==================================================
-# WEBSITE READER
-# ==================================================
+# =====================================================
+# WEBSITE EXTRACTION
+# =====================================================
 
-def read_page(url):
+def get_page(url):
 
     try:
 
         response = requests.get(
             url,
             headers=HEADERS,
-            timeout=12
+            timeout=15
         )
 
         if response.status_code != 200:
@@ -630,40 +654,34 @@ def read_page(url):
         return None, None
 
 
-# ==================================================
-# EXTRACT PRESCHOOL WEBSITE
-# ==================================================
-
 def extract_preschool(
     url,
     locality,
+    city,
     district,
-    state
+    state,
+    country,
+    pincode,
+    search_evidence
 ):
 
-    response, soup = read_page(url)
+    response, soup = get_page(url)
 
     if response is None:
         return None
 
-    title = clean_text(
+    title = clean(
         soup.title.get_text()
         if soup.title else ""
     )
 
-    items = flatten_json(
-        get_jsonld(soup)
+    items = flatten(
+        extract_jsonld(soup)
     )
 
-    structured_name = get_organisation_name(
-        items
-    )
+    org_name = organisation_name(items)
 
-    address = get_structured_address(
-        items
-    )
-
-    # Extract visible content.
+    address = structured_address(items)
 
     for tag in soup([
         "script",
@@ -673,37 +691,40 @@ def extract_preschool(
 
         tag.decompose()
 
-    page_text = clean_text(
+    page_text = clean(
         soup.get_text(" ", strip=True)
     )
 
-    full_text = (
-        title + " "
-        + address + " "
-        + page_text
+    # Location validation uses actual page content,
+    # structured address and search result evidence.
+
+    evidence = (
+        address + " "
+        + page_text + " "
+        + search_evidence
     )
 
-    # Strict preschool validation.
-
-    if not contains_preschool_terms(full_text):
-        return None
-
-    # Strict location validation.
-
-    location_text = (
-        full_text + " "
-        + url
-    )
-
-    if not location_matches(
-        location_text,
+    if not validate_location(
+        evidence,
         locality,
+        city,
         district,
-        state
+        state,
+        country,
+        pincode
     ):
         return None
 
-    # Reject informational articles.
+    combined = title + " " + page_text
+
+    if not any(
+        word in combined.lower()
+        for word in PRESCHOOL_TERMS
+    ):
+        return None
+
+    if article_page(title, url):
+        return None
 
     if any(
         word in title.lower()
@@ -711,23 +732,18 @@ def extract_preschool(
     ):
         return None
 
-    # Require a meaningful organisation name.
-
-    name = extract_preschool_name(
+    name = preschool_name(
         title,
-        structured_name
+        org_name
     )
 
     if not name:
         return None
 
-    # Avoid generic information pages.
-
     generic_names = [
         "home",
         "about us",
         "contact us",
-        "montessori",
         "montessori theory",
         "what is montessori",
         "preschool education",
@@ -737,7 +753,19 @@ def extract_preschool(
     if name.lower() in generic_names:
         return None
 
-    # Contacts.
+    # Require evidence of an actual operating centre.
+
+    has_business_evidence = (
+        bool(address)
+        or bool(extract_phones(page_text))
+        or any(
+            word in combined.lower()
+            for word in BUSINESS_INDICATORS
+        )
+    )
+
+    if not has_business_evidence:
+        return None
 
     email = extract_email(
         response.text
@@ -755,27 +783,31 @@ def extract_preschool(
         else ""
     )
 
-    # Address and pincode.
+    # Extract pincode from actual page evidence.
 
-    pincode_match = re.search(
+    pin_match = re.search(
         r"\b[1-8]\d{5}\b",
         address + " " + page_text
     )
 
-    pincode = (
-        pincode_match.group()
-        if pincode_match
+    extracted_pin = (
+        pin_match.group()
+        if pin_match
         else ""
     )
 
-    # Establishment year.
+    # Do not insert the searched pincode if the website
+    # does not publish it.
 
-    established_year = extract_established_year(
+    if pincode and extracted_pin != pincode:
+        return None
+
+    established = extract_year(
         page_text,
         items
     )
 
-    branch = extract_branch_name(
+    branch = branch_name(
         items,
         address,
         locality
@@ -784,133 +816,143 @@ def extract_preschool(
     return {
         "Preschool Name": name,
         "Branch Name": branch,
-        "Website": normalise_url(url),
+        "Website": clean_url(url),
         "Email": email,
         "Phone Number": phone,
         "Alternate Phone": alternate,
         "Full Address": address,
         "Locality": locality,
-        "Pincode": pincode,
+        "Pincode": extracted_pin,
         "District": district,
         "State": state,
-        "Country": "India",
-        "Preschool Type": classify_preschool(full_text),
+        "Country": country,
+        "Preschool Type": preschool_type(combined),
         "Category": "Preschool",
-        "Established Year": established_year
+        "Established Year": established
     }
 
 
-# ==================================================
-# SEARCH ENGINE
-# ==================================================
+# =====================================================
+# SEARCH
+# =====================================================
 
 def search_preschools(
     locality,
+    pincode,
+    city,
     district,
     state,
+    country,
     categories,
-    max_results,
+    limit,
     progress,
     status
 ):
 
-    location = (
-        f"{locality}, {district}, {state}, India"
-    )
-
-    queries = []
-
-    for category in categories:
-
-        queries.extend([
-            f'{category} "{locality}" "{district}" India',
-            f'{category} in {locality} Bengaluru Karnataka',
-            f'{category} centres {locality} Bangalore India'
-        ])
-
-    discovered = []
+    all_records = []
 
     seen_urls = set()
 
-    total = len(queries)
+    for index, category in enumerate(categories):
 
-    for index, query in enumerate(queries):
-
-        status.write(
-            f"Searching: {query}"
-        )
-
-        try:
-
-            with DDGS() as ddgs:
-
-                results = list(
-                    ddgs.text(
-                        query,
-                        max_results=max_results,
-                        region="in-en"
-                    )
-                )
-
-        except Exception as error:
-
-            status.warning(
-                f"Search request could not be completed: {error}"
+        queries = [
+            (
+                f'{category} "{locality}" "{pincode}" '
+                f'"{city}" "{state}" {country} preschool centre'
+            ),
+            (
+                f'{category} in "{locality}" "{city}" '
+                f'"{state}" India official website'
             )
+        ]
 
-            results = []
-
-        for result in results:
-
-            url = result.get("href", "")
-
-            if not url.startswith("http"):
-                continue
-
-            if is_blocked(url):
-                continue
-
-            if is_article_url(url):
-                continue
-
-            clean_url = normalise_url(url)
-
-            if clean_url in seen_urls:
-                continue
-
-            seen_urls.add(clean_url)
+        for query in queries:
 
             status.write(
-                f"Checking preschool website: {clean_url}"
+                f"Searching: {query}"
             )
 
-            record = extract_preschool(
-                clean_url,
-                locality,
-                district,
-                state
-            )
+            try:
 
-            if record:
+                with DDGS() as ddgs:
 
-                discovered.append(record)
+                    results = list(
+                        ddgs.text(
+                            query,
+                            region="in-en",
+                            max_results=limit
+                        )
+                    )
 
-            time.sleep(0.4)
+            except Exception as error:
+
+                status.warning(
+                    f"Search provider error: {error}"
+                )
+
+                results = []
+
+            for result in results:
+
+                url = result.get("href", "")
+
+                if not url.startswith("http"):
+                    continue
+
+                if blocked(url):
+                    continue
+
+                if article_page(
+                    result.get("title", ""),
+                    url
+                ):
+                    continue
+
+                url = clean_url(url)
+
+                if url in seen_urls:
+                    continue
+
+                seen_urls.add(url)
+
+                search_evidence = (
+                    clean(result.get("title", ""))
+                    + " "
+                    + clean(result.get("body", ""))
+                )
+
+                status.write(
+                    f"Checking: {url}"
+                )
+
+                record = extract_preschool(
+                    url,
+                    locality,
+                    city,
+                    district,
+                    state,
+                    country,
+                    pincode,
+                    search_evidence
+                )
+
+                if record:
+                    all_records.append(record)
+
+                time.sleep(0.3)
 
         progress.progress(
-            int(((index + 1) / total) * 100)
+            int(((index + 1) / len(categories)) * 100)
         )
 
-        time.sleep(0.5)
-
-    return discovered
+    return all_records
 
 
-# ==================================================
-# DUPLICATE REMOVAL
-# ==================================================
+# =====================================================
+# DEDUPLICATION
+# =====================================================
 
-def remove_duplicates(records):
+def deduplicate(records):
 
     df = pd.DataFrame(
         records,
@@ -932,16 +974,14 @@ def remove_duplicates(records):
         keep="first"
     )
 
-    df = df.drop(
+    return df.drop(
         columns=["_url"]
     )
 
-    return df
 
-
-# ==================================================
+# =====================================================
 # DASHBOARD
-# ==================================================
+# =====================================================
 
 st.title(
     "Rewyoo Preschool Finder"
@@ -952,24 +992,35 @@ st.caption(
 )
 
 st.info(
-    "Search for actual preschool establishments and physical branches. "
-    "Educational articles and general information pages are excluded."
+    "Search for actual preschool establishments and branches. "
+    "Location filters are applied before adding records."
 )
 
 
-# LOCATION
+# LOCATION INPUTS
 
 st.subheader(
     "1. Search Location"
 )
 
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns(2)
 
 with col1:
 
     locality = st.text_input(
         "Locality / Area",
         value="Whitefield"
+    )
+
+    pincode = st.text_input(
+        "Pincode (optional)",
+        value="560066",
+        max_chars=6
+    )
+
+    city = st.text_input(
+        "City",
+        value="Bengaluru"
     )
 
 with col2:
@@ -979,11 +1030,14 @@ with col2:
         value="Bengaluru Urban"
     )
 
-with col3:
-
     state = st.text_input(
         "State",
         value="Karnataka"
+    )
+
+    country = st.text_input(
+        "Country",
+        value="India"
     )
 
 
@@ -993,15 +1047,10 @@ st.subheader(
     "2. Search Results"
 )
 
-max_results = st.selectbox(
+limit = st.selectbox(
     "Show results",
     [10, 50, 100, 300, 500],
     index=0
-)
-
-st.caption(
-    "This controls the maximum number of search results requested "
-    "for each search query. Actual verified preschool records may be fewer."
 )
 
 
@@ -1032,7 +1081,8 @@ categories = st.multiselect(
 )
 
 st.caption(
-    "Includes independent centres, chains and franchise branches."
+    "Includes independent preschools, chains, franchise centres "
+    "and daycare-cum-preschools."
 )
 
 st.divider()
@@ -1050,22 +1100,31 @@ if st.button(
     use_container_width=True
 ):
 
-    if not locality.strip():
+    if not all([
+        locality.strip(),
+        city.strip(),
+        district.strip(),
+        state.strip(),
+        country.strip()
+    ]):
 
         st.error(
-            "Please enter a locality."
+            "Please complete all mandatory location fields."
         )
 
-    elif not district.strip() or not state.strip():
+    elif pincode and not re.fullmatch(
+        r"\d{6}",
+        pincode
+    ):
 
         st.error(
-            "Please enter the district and state."
+            "Enter a valid six-digit pincode or leave it blank."
         )
 
     elif not categories:
 
         st.error(
-            "Please select at least one category."
+            "Select at least one preschool category."
         )
 
     else:
@@ -1078,17 +1137,18 @@ if st.button(
 
             records = search_preschools(
                 locality.strip(),
+                pincode.strip(),
+                city.strip(),
                 district.strip(),
                 state.strip(),
+                country.strip(),
                 categories,
-                max_results,
+                limit,
                 progress,
                 status
             )
 
-            new_df = remove_duplicates(
-                records
-            )
+            new_df = deduplicate(records)
 
             old_df = pd.DataFrame(
                 st.session_state.results,
@@ -1100,7 +1160,7 @@ if st.button(
                 ignore_index=True
             )
 
-            combined = remove_duplicates(
+            combined = deduplicate(
                 combined.to_dict("records")
             )
 
@@ -1112,15 +1172,17 @@ if st.button(
                 "Search Date": datetime.now().strftime(
                     "%d-%m-%Y %H:%M"
                 ),
-                "Location": (
-                    f"{locality}, {district}, {state}, India"
-                ),
+                "Locality": locality,
+                "Pincode": pincode,
+                "City": city,
+                "District": district,
+                "State": state,
+                "Country": country,
                 "Records Found": len(new_df)
             })
 
             status.success(
-                f"Search completed. "
-                f"{len(new_df)} relevant records discovered."
+                f"Search completed. {len(new_df)} records discovered."
             )
 
         except Exception as error:
@@ -1189,11 +1251,11 @@ if st.session_state.results:
 else:
 
     st.info(
-        "No preschool records available. Start a search to discover preschools."
+        "No records available. Start a search to discover preschools."
     )
 
 
-# HISTORY
+# SEARCH HISTORY
 
 st.divider()
 
@@ -1219,5 +1281,5 @@ else:
 
 
 st.caption(
-    "Rewyoo Preschool Finder | Location-filtered extraction"
+    "Rewyoo Preschool Finder"
 )
