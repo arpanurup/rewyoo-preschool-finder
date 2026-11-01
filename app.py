@@ -1,4 +1,12 @@
 import streamlit as st
+import pandas as pd
+import requests
+import re
+import time
+from io import BytesIO
+from urllib.parse import urlparse
+from bs4 import BeautifulSoup
+from ddgs import DDGS
 
 st.set_page_config(
     page_title="Rewyoo Preschool Finder",
@@ -6,37 +14,31 @@ st.set_page_config(
     layout="wide"
 )
 
-# Application Header
 st.title("Rewyoo Preschool Finder")
 st.caption("Preschool discovery and data extraction across India")
 
 st.divider()
 
-# Search Configuration
 st.subheader("Search Configuration")
 
-# Pincode Input
 pincode = st.text_input(
     "Enter Pincode",
     placeholder="Example: 560066",
     max_chars=6
 )
 
-# Fixed Country
 st.text_input(
     "Country",
     value="India",
     disabled=True
 )
 
-# Maximum Records
 result_limit = st.selectbox(
     "Maximum Records",
     [5, 10, 25, 50, 100, 200, 300, 400, 500],
     index=0
 )
 
-# Preschool Categories
 categories = st.multiselect(
     "Preschool Categories",
     [
@@ -59,34 +61,413 @@ categories = st.multiselect(
 
 st.divider()
 
-# Search Button
+
+# -----------------------------
+# PINCODE INFORMATION
+# -----------------------------
+
+def get_pincode_details(pin):
+    url = f"https://api.postalpincode.in/pincode/{pin}"
+
+    try:
+        response = requests.get(url, timeout=20)
+        response.raise_for_status()
+
+        data = response.json()
+
+        if data and data[0].get("Status") == "Success":
+            offices = data[0].get("PostOffice") or []
+
+            if offices:
+                return {
+                    "district": offices[0].get("District", ""),
+                    "state": offices[0].get("State", ""),
+                    "offices": offices
+                }
+
+    except Exception:
+        pass
+
+    return None
+
+
+# -----------------------------
+# CONTACT EXTRACTION
+# -----------------------------
+
+def extract_contacts(url):
+    emails = set()
+    phones = set()
+
+    try:
+        response = requests.get(
+            url,
+            timeout=12,
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            }
+        )
+
+        if response.status_code != 200:
+            return "", ""
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        text = soup.get_text(" ", strip=True)
+
+        # Extract email addresses
+        email_matches = re.findall(
+            r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+            text
+        )
+
+        for email in email_matches:
+            if not email.lower().endswith(
+                (".png", ".jpg", ".jpeg", ".webp")
+            ):
+                emails.add(email.lower())
+
+        # Extract phone numbers
+        phone_matches = re.findall(
+            r"(?:\+91[\s-]?)?[6-9]\d{9}",
+            text
+        )
+
+        for phone in phone_matches:
+            cleaned = re.sub(r"\D", "", phone)
+
+            if cleaned.startswith("91") and len(cleaned) == 12:
+                cleaned = cleaned[2:]
+
+            if len(cleaned) == 10:
+                phones.add(cleaned)
+
+    except Exception:
+        pass
+
+    return (
+        ", ".join(sorted(emails)),
+        ", ".join(sorted(phones))
+    )
+
+
+# -----------------------------
+# SEARCH ENGINE
+# -----------------------------
+
+def search_preschools(pin, district, state, selected_categories, limit):
+
+    records = []
+    seen_urls = set()
+    seen_names = set()
+
+    location = " ".join(
+        part for part in [district, state, "India"] if part
+    )
+
+    progress = st.progress(0)
+    status = st.empty()
+
+    total_categories = len(selected_categories)
+
+    try:
+        with DDGS() as search_engine:
+
+            for index, category in enumerate(selected_categories):
+
+                status.info(
+                    f"Searching for {category} near PIN code {pin}..."
+                )
+
+                queries = [
+                    f'{category} "{pin}" India',
+                    f'{category} near {pin} {location}',
+                    f'{category} {location} India'
+                ]
+
+                for query in queries:
+
+                    try:
+                        results = search_engine.text(
+                            query,
+                            region="in-en",
+                            safesearch="moderate",
+                            max_results=15
+                        )
+
+                    except Exception:
+                        continue
+
+                    for result in results:
+
+                        if len(records) >= limit:
+                            break
+
+                        title = result.get("title", "").strip()
+                        url = result.get("href", "").strip()
+                        snippet = result.get("body", "").strip()
+
+                        if not title or not url:
+                            continue
+
+                        parsed_url = urlparse(url)
+
+                        if parsed_url.scheme not in ["http", "https"]:
+                            continue
+
+                        domain = parsed_url.netloc.lower()
+
+                        if not domain:
+                            continue
+
+                        combined_text = (
+                            title + " " + snippet
+                        ).lower()
+
+                        preschool_terms = [
+                            "preschool",
+                            "pre school",
+                            "playschool",
+                            "play school",
+                            "montessori",
+                            "nursery",
+                            "kindergarten",
+                            "daycare",
+                            "day care"
+                        ]
+
+                        if not any(
+                            term in combined_text
+                            for term in preschool_terms
+                        ):
+                            continue
+
+                        # Avoid duplicate pages
+                        normalized_url = url.split("?")[0].rstrip("/").lower()
+
+                        normalized_name = re.sub(
+                            r"[^a-z0-9]",
+                            "",
+                            title.lower()
+                        )
+
+                        if normalized_url in seen_urls:
+                            continue
+
+                        if normalized_name in seen_names:
+                            continue
+
+                        seen_urls.add(normalized_url)
+                        seen_names.add(normalized_name)
+
+                        status.info(
+                            f"Checking contact details: {title}"
+                        )
+
+                        email, phone = extract_contacts(url)
+
+                        records.append({
+                            "Preschool Name": title,
+                            "Branch Name": "",
+                            "Website": url,
+                            "Email": email,
+                            "Phone Number": phone,
+                            "Alternate Phone": "",
+                            "Full Address": snippet,
+                            "Locality": "",
+                            "Pincode": pin,
+                            "District": district,
+                            "State": state,
+                            "Country": "India",
+                            "Preschool Type": category,
+                            "Category": category,
+                            "Established Year": ""
+                        })
+
+                        time.sleep(0.3)
+
+                    if len(records) >= limit:
+                        break
+
+                progress.progress(
+                    min((index + 1) / total_categories, 1.0)
+                )
+
+                if len(records) >= limit:
+                    break
+
+    finally:
+        progress.empty()
+        status.empty()
+
+    return records
+
+
+# -----------------------------
+# EXCEL EXPORT
+# -----------------------------
+
+def create_excel(records):
+
+    columns = [
+        "Preschool Name",
+        "Branch Name",
+        "Website",
+        "Email",
+        "Phone Number",
+        "Alternate Phone",
+        "Full Address",
+        "Locality",
+        "Pincode",
+        "District",
+        "State",
+        "Country",
+        "Preschool Type",
+        "Category",
+        "Established Year"
+    ]
+
+    df = pd.DataFrame(records, columns=columns)
+
+    output = BytesIO()
+
+    with pd.ExcelWriter(
+        output,
+        engine="openpyxl"
+    ) as writer:
+
+        df.to_excel(
+            writer,
+            index=False,
+            sheet_name="Preschool Data"
+        )
+
+        worksheet = writer.sheets["Preschool Data"]
+
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = worksheet.dimensions
+
+        for column_cells in worksheet.columns:
+            max_length = max(
+                len(str(cell.value or ""))
+                for cell in column_cells
+            )
+
+            worksheet.column_dimensions[
+                column_cells[0].column_letter
+            ].width = min(max_length + 3, 45)
+
+    output.seek(0)
+
+    return output
+
+
+# -----------------------------
+# START SEARCH
+# -----------------------------
+
 if st.button(
     "Start Preschool Search",
     type="primary",
     use_container_width=True
 ):
 
-    # Validate Pincode
-    if (
-        not pincode.isdigit()
-        or len(pincode) != 6
-        or pincode[0] == "0"
-    ):
+    if not pincode.isdigit() or len(pincode) != 6 or pincode[0] == "0":
         st.error("Please enter a valid six-digit Indian PIN code.")
 
-    # Validate Categories
     elif not categories:
         st.error("Please select at least one preschool category.")
 
     else:
-        st.success("Search configuration is ready.")
 
-        st.write("**Pincode:**", pincode)
-        st.write("**Country:** India")
-        st.write("**Maximum Records:**", result_limit)
-        st.write("**Selected Categories:**", ", ".join(categories))
+        with st.spinner("Validating PIN code..."):
+
+            pin_details = get_pincode_details(pincode)
+
+        if not pin_details:
+            st.error(
+                "Unable to validate this PIN code. "
+                "Please check the PIN code and try again."
+            )
+
+        else:
+
+            district = pin_details["district"]
+            state = pin_details["state"]
+
+            st.success(
+                f"PIN code verified: {district}, {state}, India"
+            )
+
+            st.info(
+                "Searching public web listings. "
+                "This may take a few minutes."
+            )
+
+            try:
+
+                records = search_preschools(
+                    pincode,
+                    district,
+                    state,
+                    categories,
+                    result_limit
+                )
+
+                if records:
+
+                    df = pd.DataFrame(records)
+
+                    st.success(
+                        f"Search completed. Found {len(records)} "
+                        "potential preschool listings."
+                    )
+
+                    st.subheader("Search Results")
+
+                    st.dataframe(
+                        df,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+                    excel_file = create_excel(records)
+
+                    st.download_button(
+                        label="Download Excel",
+                        data=excel_file,
+                        file_name=f"Rewyoo_Preschools_{pincode}.xlsx",
+                        mime=(
+                            "application/vnd.openxmlformats-officedocument."
+                            "spreadsheetml.sheet"
+                        ),
+                        type="primary",
+                        use_container_width=True
+                    )
+
+                    st.caption(
+                        "Review the results before using them. "
+                        "Search listings and extracted contact details "
+                        "may be incomplete or outdated."
+                    )
+
+                else:
+
+                    st.warning(
+                        "No matching preschool listings were found. "
+                        "Try again later or use another PIN code."
+                    )
+
+            except Exception as error:
+
+                st.error(
+                    "The search could not be completed. "
+                    "Please try again later."
+                )
+
+                st.caption(str(error))
+
 
 st.divider()
 
-# Footer
 st.caption("Rewyoo Preschool Finder | India")
